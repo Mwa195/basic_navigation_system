@@ -35,6 +35,28 @@ class Costmap(Node):
 
             if 0 <= x < self.map_size and 0 <= y < self.map_size:
                 self.map[y, x] = 100
+            
+
+        inflation_cells = int(self.inflation_radius / self.resolution)
+
+        inflated_map = self.map.copy()
+
+        for y in range(self.map_size):
+            for x in range(self.map_size):
+                if self.map[y, x] == 100:
+                    for dy in range(-inflation_cells, inflation_cells + 1):
+                        for dx in range(-inflation_cells, inflation_cells + 1):
+                            ny = y + dy
+                            nx = x + dx
+                            if 0 <= nx < self.map_size and 0 <= ny < self.map_size:
+                                distance = math.sqrt(dx*dx + dy*dy)
+                                if distance <= inflation_cells:
+                                    cost = int(100 * (1 - distance / inflation_cells))
+                                    if cost > inflated_map[ny, nx]:
+                                        inflated_map[ny, nx] = cost
+
+        self.map = inflated_map
+
 
         grid = OccupancyGrid()
         grid.header.stamp = self.get_clock().now().to_msg()
