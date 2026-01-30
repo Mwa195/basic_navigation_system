@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+ROS2 Node:
+Single Wheel Odometry using encoder + IMU yaw
+Rotation
+"""
+
+import rclpy
+from rclpy.node import Node
+
+from std_msgs.msg import Int16, Float32, Int8
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import TransformBroadcaster
+
+from tf_transformations import quaternion_from_euler
+from math import pi, sin, cos, radians
+
+
+class SingleWheelOdom(Node):
+
+    def __init__(self):
+        super().__init__('single_wheel_odom')
+
+        # - Parameters
+        self.declare_parameter('wheel_diameter', 0.24)
+        self.declare_parameter('ticks_per_rev', 580.0)
+        self.declare_parameter('update_rate', 10.0)
+
+        self.wheel_diameter = self.get_parameter('wheel_diameter').value
+        self.ticks_per_rev = self.get_parameter('ticks_per_rev').value
+        self.rate = self.get_parameter('update_rate').value
+
+        # - Publishers
+        self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        # - Subscribers
+        self.create_subscription(Int16, '/front_ticks', self.encoder_cb, 10)
+        self.create_subscription(Float32, '/yaw', self.yaw_cb, 10)
+        self.create_subscription(Int8, '/motion', self.motion_cb, 10)
+
+        # - Timer
+        self.timer = self.create_timer(1.0 / self.rate, self.update)
+
+        # - Encoder wrap constants
+        self.ENC_MIN = -32768
+        self.ENC_MAX = 32768
+        self.LOW_WRAP = int((self.ENC_MAX - self.ENC_MIN) * 0.3 + self.ENC_MIN)
+        self.HIGH_WRAP = int((self.ENC_MAX - self.ENC_MIN) * 0.7 + self.ENC_MIN)
+
+        # - Encoder state
+        self.prev_encoder = None
+        self.wrap_count = 0
+
+        self.total_ticks = 0.0
+        self.rotation_ticks = 0.0
+        self.rot_start = 0.0
+        self.rot_prev = 0.0
+
+        # - Robot state
+        self.motion = 0
+        self.yaw = 0.0
+
+        self.x = 0.0
+        self.y = 0.0
+        self.prev_distance = 0.0
+
+        self.get_logger().info("Single wheel odometry started")
+
+    # - Callbacks
+    def yaw_cb(self, msg):
+        self.yaw = radians(360.0 - msg.data)
+
+    def motion_cb(self, msg):
+        self.motion = msg.data
+
+    def encoder_cb(self, msg):
+        enc = int(msg.data)
+
+        if self.prev_encoder is None:
+            self.prev_encoder = enc
+            return
+
+        # - Overflow handling
+        if enc < self.LOW_WRAP and self.prev_encoder > self.HIGH_WRAP:
+            self.wrap_count += 1
+        elif enc > self.HIGH_WRAP and self.prev_encoder < self.LOW_WRAP:
+            self.wrap_count -= 1
+
+        full_ticks = enc + self.wrap_count * (self.ENC_MAX - self.ENC_MIN)
+
+        # - Rotation compensation
+        if self.motion == 1 or self.motion == 2:
+            self.rotation_ticks = (full_ticks - self.rot_start) + self.rot_prev
+        else:
+            self.rot_start = full_ticks
+            self.rot_prev = self.rotation_ticks
+
+        self.prev_encoder = enc
+        self.total_ticks = full_ticks - self.rotation_ticks
+
+    # - Main update
+    def update(self):
+
+        distance = abs(
+            (pi * self.wheel_diameter * self.total_ticks) / self.ticks_per_rev
+        )
+
+        delta_d = distance - self.prev_distance
+        self.prev_distance = distance
+
+        self.x += delta_d * sin(self.yaw)
+        self.y += delta_d * cos(self.yaw)
+
+        # - Odometry
+        odom = Odometry()
+        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.frame_id = "odom"
+        odom.child_frame_id = "base_link"
+
+        odom.pose.pose.position.x = self.x
+        odom.pose.pose.position.y = self.y
+
+        q = quaternion_from_euler(0.0, 0.0, self.yaw)
+        odom.pose.pose.orientation.x = q[0]
+        odom.pose.pose.orientation.y = q[1]
+        odom.pose.pose.orientation.z = q[2]
+        odom.pose.pose.orientation.w = q[3]
+
+        odom.twist.twist.linear.x = delta_d * self.rate
+        odom.twist.twist.angular.z = 0.0
+
+        self.odom_pub.publish(odom)
+
+        # - TF
+        tf = TransformStamped()
+        tf.header.stamp = odom.header.stamp
+        tf.header.frame_id = "odom"
+        tf.child_frame_id = "base_link"
+
+        tf.transform.translation.x = self.x
+        tf.transform.translation.y = self.y
+        tf.transform.translation.z = 0.0
+
+        tf.transform.rotation.x = q[0]
+        tf.transform.rotation.y = q[1]
+        tf.transform.rotation.z = q[2]
+        tf.transform.rotation.w = q[3]
+
+        self.tf_broadcaster.sendTransform(tf)
+
+
+# - Main
+def main(args=None):
+    rclpy.init(args=args)
+    node = SingleWheelOdom()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
